@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sc-brain: Authorize access</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.35rem; }
+  label { display: block; margin-bottom: 0.75rem; }
+  input { display: block; width: 100%; padding: 0.4rem; margin-top: 0.25rem; box-sizing: border-box; }
+  button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
+  #approve { background: #16a34a; color: white; border: none; border-radius: 4px; }
+  #deny { background: #dc2626; color: white; border: none; border-radius: 4px; }
+  .error { color: #dc2626; }
+  ul { margin-top: 0.25rem; }
+</style>
+</head>
+<body>
+<main id="app"><p>Loading...</p></main>
+
+<script type="module">
+// Local-only OAuth consent screen for sc-brain's Supabase OAuth 2.1 server.
+// Signs in against the local Auth server with synthetic seed personas only.
+// Uses the publishable/anon key exclusively; never the service_role/secret key.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.117.2"
+
+const SUPABASE_URL = "https://cuwijhmwntbtlzxlgicl.supabase.co"
+const SUPABASE_ANON_KEY = "sb_publishable_PE4yvh2cE7TLlBjOglLqfg_WZ0Wq9fC"
+// "password" for the local stack (seed personas), "google" for the hosted project.
+const AUTH_MODE = "google"
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+const app = document.getElementById("app")
+const params = new URLSearchParams(window.location.search)
+const authorizationId = params.get("authorization_id")
+
+function render(html) {
+  app.innerHTML = html
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ))
+}
+
+async function main() {
+  if (!authorizationId) {
+    render('<p class="error">Error: missing authorization_id query parameter.</p>')
+    return
+  }
+
+  const { data: { session } } = await supabase.auth.getSession()
+
+  if (!session) {
+    renderSignIn()
+    return
+  }
+
+  await showConsent()
+}
+
+function renderGoogleSignIn() {
+  render(`
+    <h1>Sign in to sc-brain</h1>
+    <p>Sign in with your Harbinger Marketing account to review this authorization request.</p>
+    <button id="google-signin" type="button">Continue with Google</button>
+    <p id="signin-error" class="error"></p>
+  `)
+
+  document.getElementById("google-signin").addEventListener("click", async () => {
+    // The hd option is only a Google account-picker hint. The real enforcement
+    // is the server-side sign-up hook plus the members table: an account
+    // without a members row sees no data.
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.href,
+        queryParams: { hd: "harbingermarketing.com" },
+      },
+    })
+    if (error) {
+      document.getElementById("signin-error").textContent = error.message
+    }
+  })
+}
+
+function renderSignIn() {
+  if (AUTH_MODE === "google") {
+    renderGoogleSignIn()
+    return
+  }
+  render(`
+    <h1>Sign in to sc-brain</h1>
+    <p>Sign in with your Harbinger Marketing account to review this authorization request.</p>
+    <form id="signin-form">
+      <label>Email
+        <input type="email" name="email" required autocomplete="username" />
+      </label>
+      <label>Password
+        <input type="password" name="password" required autocomplete="current-password" />
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+    <p id="signin-error" class="error"></p>
+  `)
+
+  document.getElementById("signin-form").addEventListener("submit", async (event) => {
+    event.preventDefault()
+    const form = new FormData(event.target)
+    const email = String(form.get("email") || "")
+    const password = String(form.get("password") || "")
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) {
+      document.getElementById("signin-error").textContent = error.message
+      return
+    }
+    await showConsent()
+  })
+}
+
+async function showConsent() {
+  const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId)
+
+  if (error) {
+    render(`<p class="error">Error: ${escapeHtml(error.message)}</p>`)
+    return
+  }
+
+  // If the user already consented, Supabase returns a redirect instead of
+  // authorization details. Follow it immediately without re-prompting.
+  if (!("authorization_id" in data)) {
+    window.location.href = data.redirect_url
+    return
+  }
+
+  const scopes = (data.scope || "").split(" ").filter(Boolean)
+
+  render(`
+    <h1>Authorize ${escapeHtml(data.client.name)}</h1>
+    <p>Signed in as ${escapeHtml(data.user.email)}.</p>
+    <p><strong>Redirect URI:</strong> ${escapeHtml(data.redirect_uri)}</p>
+    <p><strong>Requested scopes:</strong></p>
+    <ul>${scopes.map((s) => `<li>${escapeHtml(s)}</li>`).join("") || "<li>(none)</li>"}</ul>
+    <button id="approve">Approve</button>
+    <button id="deny">Deny</button>
+    <p id="consent-error" class="error"></p>
+  `)
+
+  document.getElementById("approve").addEventListener("click", async () => {
+    const { data, error } = await supabase.auth.oauth.approveAuthorization(authorizationId, {
+      skipBrowserRedirect: true,
+    })
+    if (error) {
+      document.getElementById("consent-error").textContent = error.message
+      return
+    }
+    window.location.href = data.redirect_url
+  })
+
+  document.getElementById("deny").addEventListener("click", async () => {
+    const { data, error } = await supabase.auth.oauth.denyAuthorization(authorizationId, {
+      skipBrowserRedirect: true,
+    })
+    if (error) {
+      document.getElementById("consent-error").textContent = error.message
+      return
+    }
+    window.location.href = data.redirect_url
+  })
+}
+
+main()
+</script>
+</body>
+</html>
